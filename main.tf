@@ -6,13 +6,21 @@ module "workspacepro_vpc" {
   azs                          = ["us-east-1a", "us-east-1b", "us-east-1c"]
   private_subnets              = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
   public_subnets               = ["10.0.11.0/24", "10.0.12.0/24", "10.0.13.0/24"]
-  database_subnets             = ["10.0.21.0/24", "10.0.22.0/24", "10.0.23.0/24"]
+  #database_subnets             = ["10.0.21.0/24", "10.0.22.0/24", "10.0.23.0/24"]
   create_database_subnet_group = true
-  enable_dns_hostnames         = true
-  enable_dns_support           = true
-  enable_nat_gateway           = true
-  single_nat_gateway           = true
-  tags                         = { "Name" = "workspacepro-vpc", "created-by" = "terraform", Environment = "dev" }
+
+  enable_nat_gateway = true
+  single_nat_gateway = true
+  #one_nat_gateway_per_az = true
+
+  enable_ipv6                                   = false
+  public_subnet_assign_ipv6_address_on_creation = false
+
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+  tags                 = {
+    "Name" = "workspacepro-vpc", "created-by" = "terraform", Environment = "dev"
+  }
 }
 
 
@@ -54,7 +62,8 @@ module "sg_workspacepro_app" {
   vpc_id                                         = module.workspacepro_vpc.vpc_id
   computed_ingress_with_source_security_group_id = [
     {
-      rule                     = "http-8080-tcp"
+      #rule                     = "http-8080-tcp"
+      rule                     = "grafana-tcp"
       source_security_group_id = module.sg_workspacepro_elb.security_group_id
     }
   ]
@@ -73,11 +82,19 @@ module "sg_workspacepro_app" {
       from_port   = 8080
       to_port     = 8080
       protocol    = "tcp"
-      description = "default tomcat port access from anywhere to trouble shoot"
+      description = "default tomcat port access ipv4 from anywhere to trouble shoot"
+      cidr_blocks = "0.0.0.0/0"
+    },
+    {
+      from_port   = 3000
+      to_port     = 3000
+      protocol    = "tcp"
+      description = "default node port access ipv4 from anywhere to trouble shoot"
       cidr_blocks = "0.0.0.0/0"
     }
+
   ]
-  number_of_computed_ingress_with_cidr_blocks = 2
+  number_of_computed_ingress_with_cidr_blocks = 3
 
 
   egress_rules = ["all-all"]
@@ -160,13 +177,14 @@ resource "aws_instance" "workspacepro_backend_db" {
   tags                   = {
     "Name" = "workspacepro_backend_db", "created-by" = "terraform", Environment = "dev"
   }
-  subnet_id = module.workspacepro_vpc.private_subnets[0]
+  subnet_id = module.workspacepro_vpc.public_subnets[0]
   root_block_device {
     volume_size = 10
     volume_type = "gp2"
   }
   associate_public_ip_address = true
   user_data                   = "${file("user_data_files/mysql.sh")}"
+
 }
 
 #create memcache in ec2 instance
@@ -178,7 +196,7 @@ module "memcache_instance" {
   instance_type               = "t2.micro"
   key_name                    = aws_key_pair.key_pair.key_name
   monitoring                  = true
-  subnet_id                   = module.workspacepro_vpc.private_subnets[0]
+  subnet_id                   = module.workspacepro_vpc.public_subnets[0]
   vpc_security_group_ids      = [module.sg_workspacepro_backend.security_group_id]
   associate_public_ip_address = true
   tags                        = {
@@ -196,7 +214,7 @@ module "rabbitmq_instance" {
   instance_type               = "t2.micro"
   key_name                    = aws_key_pair.key_pair.key_name
   monitoring                  = true
-  subnet_id                   = module.workspacepro_vpc.private_subnets[0]
+  subnet_id                   = module.workspacepro_vpc.public_subnets[0]
   vpc_security_group_ids      = [module.sg_workspacepro_backend.security_group_id]
   associate_public_ip_address = true
   tags                        = {
@@ -214,10 +232,11 @@ module "tomcat_instance" {
   instance_type               = "t2.micro"
   key_name                    = aws_key_pair.key_pair.key_name
   monitoring                  = true
-  subnet_id                   = module.workspacepro_vpc.private_subnets[0]
+  subnet_id                   = module.workspacepro_vpc.public_subnets[0]
   vpc_security_group_ids      = [module.sg_workspacepro_app.security_group_id]
   associate_public_ip_address = true
-  tags                        = {
+
+  tags = {
     "Name" = "ec2_tomcat_instance", "created-by" = "terraform", Environment = "dev"
   }
   user_data = "${file("user_data_files/tomcat.sh")}"
@@ -278,9 +297,9 @@ module "workspacepro_alb" {
     module.workspacepro_vpc.public_subnets[2]
   ]
   security_groups = [module.sg_workspacepro_elb.security_group_id]
-   /*access_logs = {
-     bucket = "my-alb-logs-workspacepro"
-   }*/
+  /*access_logs = {
+    bucket = "my-alb-logs-workspacepro"
+  }*/
 
   target_groups = [
     {
@@ -289,9 +308,14 @@ module "workspacepro_alb" {
       backend_port     = 80
       target_type      = "instance"
       targets          = {
-        app_tomcat = {
+        #app_tomcat = {
+        # target_id = module.tomcat_instance.id
+        # port      = 8080
+        #},
+        app_node = {
           target_id = module.tomcat_instance.id
-          port      = 8080
+          port      = 3000
+
         }
       }
     }
@@ -300,7 +324,7 @@ module "workspacepro_alb" {
     {
       port               = 443
       protocol           = "HTTPS"
-      certificate_arn    = "arn:aws:acm:us-east-1:579587635809:certificate/49735cc7-5ee2-42c5-b5e1-57451afd5aef"
+      certificate_arn    = var.certificate_arn
       target_group_index = 0
     }
   ]
